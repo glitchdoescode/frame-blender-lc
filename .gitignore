@@ -1,0 +1,4 @@
+frame/*
+frame_json/*
+data/*
+.gitignore

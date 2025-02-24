@@ -56,6 +56,12 @@ def save_evaluation(entry: Dict):
     """Append a new evaluation entry to evaluation.json."""
     evaluations = load_evaluations()
     entry["id"] = len(evaluations)
+    # Ensure all fields are JSON-serializable
+    for key, value in entry.items():
+        try:
+            json.dumps(value)
+        except TypeError:
+            raise ValueError(f"Non-serializable value in {key}: {value}")
     evaluations.append(entry)
     with open(EVALUATION_FILE, "w") as f:
         json.dump(evaluations, f, indent=4)
@@ -71,11 +77,13 @@ def get_blending_instructions(settings: List[str]) -> str:
     """Get blending instructions based on settings."""
     prompting_strategy = settings[0].replace("-", "_")
     rhetorical = settings[1] == "rhetorical"
-    # Ensure the method is called correctly
     method = getattr(prompts, prompting_strategy, None)
     if method is None:
         raise ValueError(f"Invalid prompting strategy: {prompting_strategy}")
-    return method(rhetorical)
+    instructions = method(rhetorical)
+    if not isinstance(instructions, str):
+        raise ValueError(f"Instructions must be a string, got {type(instructions)}")
+    return instructions
 
 blending_prompt_template = """
 {instructions}
@@ -122,16 +130,16 @@ Evaluate the blend on the following criteria, each on a scale of 0 to 10:
 - coherence: Is the blend logically consistent?
 - execute_time: Is the blend creative and well-executed?
 
-Provide a JSON object with the scores and justifications, like this:
-{
+Provide a JSON object with the scores and justifications, ensuring the response is a single-line string with escaped newlines (\\n) if needed, like this:
+{{
     "completeness": 8,
     "clarity": 9,
     "relevance": 7,
     "depth_of_understanding": 8,
     "coherence": 9,
     "execute_time": 6,
-    "justifications": "Brief explanation here"
-}
+    "justifications": "Brief explanation with no unescaped newlines"
+}}
 """
 )
 
@@ -139,22 +147,24 @@ Provide a JSON object with the scores and justifications, like this:
 def blending_node(state: BlendingState) -> BlendingState:
     """Generate a blended expression using the RAG chain."""
     instructions = get_blending_instructions(state.settings)
-    # Ensure instructions is a string
-    if not isinstance(instructions, str):
-        raise ValueError(f"Instructions must be a string, got {type(instructions)}")
     prompt_template = PromptTemplate(
         template=blending_prompt_template,
         input_variables=["context", "input", "instructions"]
     )
     rag_chain = langchain_service.build_rag_chain(prompt_template)
     frames_str = ", ".join(state.frames)
-    context = ""  # You'll need to provide actual context or modify this
+    context = ""  # Placeholder; update with actual context if available
     response = langchain_service.generate_response(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})
+    if not isinstance(response, str):
+        raise ValueError(f"Blending response must be a string, got {type(response)}")
     state.blended_expression = response
     return state
 
 def validation_node(state: BlendingState) -> BlendingState:
     """Validate the blended expression."""
+    if not state.blended_expression:
+        state.validation_result = "Invalid: No blended expression provided"
+        return state
     prompt = validation_prompt.format(
         frames=", ".join(state.frames),
         blended_expression=state.blended_expression
@@ -165,13 +175,28 @@ def validation_node(state: BlendingState) -> BlendingState:
 
 def evaluate_node(state: BlendingState) -> BlendingState:
     """Evaluate the blended expression."""
+    if not state.blended_expression:
+        state.evaluation = {
+            "completeness": 0,
+            "clarity": 0,
+            "relevance": 0,
+            "depth_of_understanding": 0,
+            "coherence": 0,
+            "execute_time": 0,
+            "additional_notes": "No blended expression to evaluate"
+        }
+        return state
     prompt = evaluation_prompt.format(
         frames=", ".join(state.frames),
         blended_expression=state.blended_expression
     )
     response = llm.invoke(prompt)
+    # Debug: Print raw response
+    print(f"Raw Evaluation Response: {repr(response.content)}")
+    # Clean the response: strip whitespace and collapse into a single line
+    cleaned_response = ''.join(response.content.splitlines()).strip()
     try:
-        eval_data = json.loads(response.content)
+        eval_data = json.loads(cleaned_response)
         state.evaluation = {
             "completeness": int(eval_data["completeness"]),
             "clarity": int(eval_data["clarity"]),
@@ -182,7 +207,7 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "additional_notes": eval_data.get("justifications", "")
         }
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        print(f"Failed to parse evaluation response: {e}")
+        print(f"Failed to parse evaluation response: {e}, Cleaned Response: {cleaned_response}")
         state.evaluation = {
             "completeness": 0,
             "clarity": 0,
@@ -190,7 +215,7 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "depth_of_understanding": 0,
             "coherence": 0,
             "execute_time": 0,
-            "additional_notes": "Failed to parse evaluation"
+            "additional_notes": f"Failed to parse evaluation: {str(e)}"
         }
     return state
 
@@ -209,7 +234,7 @@ def storage_node(state: BlendingState) -> BlendingState:
 graph = StateGraph(BlendingState)
 graph.add_node("blending", blending_node)
 graph.add_node("validation", validation_node)
-graph.add_node("evaluate", evaluate_node)  # Renamed from "evaluation" to "evaluate"
+graph.add_node("evaluate", evaluate_node)
 graph.add_node("storage", storage_node)
 graph.add_edge("blending", "validation")
 graph.add_edge("validation", "evaluate")
@@ -225,9 +250,10 @@ if __name__ == "__main__":
         settings = select_random_settings()
         initial_state = BlendingState(frames=frames, settings=settings)
         final_state = compiled_graph.invoke(initial_state)
-        print(f"Processed frames: {frames}")
-        print(f"Settings: {settings}")
-        print(f"Blended Expression: {final_state.blended_expression}")
-        print(f"Validation: {final_state.validation_result}")
-        print(f"Evaluation: {final_state.evaluation}")
+        # Treat final_state as a dictionary since invoke returns AddableValuesDict
+        print(f"Processed frames: {final_state['frames']}")
+        print(f"Settings: {final_state['settings']}")
+        print(f"Blended Expression: {final_state['blended_expression']}")
+        print(f"Validation: {final_state['validation_result']}")
+        print(f"Evaluation: {final_state['evaluation']}")
         print("-" * 50)

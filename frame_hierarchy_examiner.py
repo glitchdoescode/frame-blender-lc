@@ -1,3 +1,4 @@
+#frame_hierarchy_examiner.py
 from frame_hierarchy_analyzer import analyze_hierarchy, frame_relations
 import os
 import json

@@ -8,7 +8,7 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.vectorstores import FAISS
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
-
+from typing import List, Dict
 
 class LangChainService:
     def __init__(self):
@@ -17,7 +17,7 @@ class LangChainService:
         self.text_splitter = SemanticChunker(self.embedder)
         self.llm = ChatOllama(model="llama3.2", temperature=1)
 
-    def load_frame_documents(self, folder_path: str = "frame_json"):
+    def load_frame_documents(self, folder_path: str = "frame_json") -> List[Document]:
         """
         Loads frame JSON files into LangChain Document objects.
         """
@@ -41,7 +41,7 @@ class LangChainService:
                     docs.append(doc)
         return docs
 
-    def create_vector_store(self, docs):
+    def create_vector_store(self, docs: List[Document]) -> str:
         """
         Creates a FAISS vector store from the loaded documents.
         """
@@ -67,12 +67,12 @@ class LangChainService:
         rag_chain = create_retrieval_chain(retriever, stuff_chain)
         return rag_chain
 
-    def generate_response(self, rag_chain, frames_str):
+    def generate_response(self, rag_chain, input_data: Dict) -> str:
         """
         Generates a response using the RAG chain.
         """
         try:
-            result = rag_chain.invoke({"input": frames_str})
+            result = rag_chain.invoke(input_data)
             return result["answer"]
         except Exception as e:
             return f"Error during generation: {str(e)}"

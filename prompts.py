@@ -1,13 +1,7 @@
 class Prompts:
-
-    def __getitem__(self, key):
-        key = key.replace(' ', '_').replace('-', '_')
-        method = getattr(self, key)
-        if callable(method):
-            return method
-        raise KeyError(f"Method {key} not found or is not callable")
-
-    example_time_money = '''# Example
+    def __init__(self):
+        self.example_time_money = '''
+# Example
 ## Expression
 "Time is money."
 ## Frames Involved:
@@ -29,7 +23,8 @@ This blend creates a new understanding where activities are seen through the len
 For example, "wasting time" implies a loss similar to wasting money, highlighting the value and scarcity of time.
 '''
 
-    example_time_thief = '''# Example
+        self.example_time_thief = '''
+# Example
 ## Expression
 "Time is a thief."
 ## Frames Involved:
@@ -49,27 +44,34 @@ Time is conceptualized as a force that steals away youth and opportunities, simi
 This blend creates an understanding that time causes irreversible loss, much like the permanent loss caused by theft.
 '''
 
-    rhetorical_instr = "Prefer to use rhetorical devices such as Analogy and Metaphor."
+        self.rhetorical_instr = "Prefer to use rhetorical devices such as Analogy and Metaphor."
 
-    def zero_shot(self, rhetorical: bool = True):
+    def __getitem__(self, key):
+        key = key.replace(' ', '_').replace('-', '_')
+        method = getattr(self, key, None)
+        if callable(method):
+            return method
+        raise KeyError(f"Method {key} not found or is not callable")
+
+    def zero_shot(self, rhetorical: bool = True) -> str:
         prompt = ""
         if rhetorical:
             prompt += self.rhetorical_instr
         return prompt
 
-    def one_shot(self, rhetorical: bool = True):
+    def one_shot(self, rhetorical: bool = True) -> str:
         prompt = "Here is an example of frame blending analysis. Follow this analyzing process while generating your response, but do not use this specific example:\n" + self.example_time_money
         if rhetorical:
             prompt += '\n' + self.rhetorical_instr
         return prompt
 
-    def few_shot(self, rhetorical: bool = True):
+    def few_shot(self, rhetorical: bool = True) -> str:
         prompt = "Here are some examples of frame blending analysis. Follow this analyzing process while generating your response, but do not use these specific examples:\n" + self.example_time_money + '\n\n' + self.example_time_thief
         if rhetorical:
             prompt += '\n' + self.rhetorical_instr
         return prompt
 
-    def chain_of_thought(self, rhetorical: bool = True):
+    def chain_of_thought(self, rhetorical: bool = True) -> str:
         prompt = """Follow these steps to create a frame blending example for the given frames:
 1. Define each of the given frames.
 2. Explain how these frames can have cross-space mapping on their structures and elements.
@@ -82,5 +84,5 @@ Please provide a detailed and clear explanation following these steps.
             prompt += '\n' + self.rhetorical_instr
         return prompt
 
-    def frame_close_to(self, frame):
+    def frame_close_to(self, frame: str) -> str:
         return f"What frames are close to '{frame}'?"

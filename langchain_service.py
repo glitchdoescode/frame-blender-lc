@@ -1,4 +1,4 @@
-#main.py
+#langchain_service.py
 import os
 import json
 import logging

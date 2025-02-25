@@ -2,6 +2,7 @@ frame/*
 frame_json/*
 data/*
 frame_json.zip
+faiss_vector_store/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

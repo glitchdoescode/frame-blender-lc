@@ -19,12 +19,35 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+def extract_frames_from_directory(dir_path: str) -> List[str]:
+    """Read each .json file in dir_path and extract the 'frame_name'."""
+    frames = []
+    for filename in os.listdir(dir_path):
+        if filename.endswith('.json'):
+            full_path = os.path.join(dir_path, filename)
+            try:
+                with open(full_path, 'r', encoding='utf-8') as file:
+                    data = json.load(file)
+                    frame_name = data.get("frame_name")
+                    if frame_name:
+                        frames.append(frame_name)
+            except (json.JSONDecodeError, OSError) as e:
+                logging.warning(f"Could not process {filename}: {e}")
+    return frames
+
 # Configuration
 EVALUATION_FILE = "data/evaluation.json"
-ALL_FRAMES = [
-    "Travel", "Aging", "Time", "Money", "Health",
-    "Education", "Technology", "Environment", "Politics", "Culture"
-]
+FRAME_JSON_DIR = "frame_json"
+ALL_FRAMES = extract_frames_from_directory(FRAME_JSON_DIR)
+
+# If no frames were found, you can optionally fall back to a default list:
+if not ALL_FRAMES:
+    ALL_FRAMES = [
+        "Travel", "Aging", "Time", "Money", "Health",
+        "Education", "Technology", "Environment", "Politics", "Culture"
+    ]
+
+print("Extracted frames:", ALL_FRAMES)
 PROMPTING_STRATEGIES = ["zero-shot", "one-shot", "few-shot", "chain-of-thought"]
 RHETORICAL_OPTIONS = ["rhetorical", "non-rhetorical"]
 

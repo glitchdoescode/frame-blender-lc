@@ -1,6 +1,7 @@
 frame/*
 frame_json/*
 data/*
+frame_json.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

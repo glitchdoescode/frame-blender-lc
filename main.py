@@ -12,7 +12,7 @@ from langchain_service import LangChainService
 from prompts import Prompts
 import logging
 
-# Configure logging at the top of the file (before the main loop)
+# Configure logging
 logging.basicConfig(
     filename="blending_context.log",
     level=logging.INFO,
@@ -65,7 +65,6 @@ def save_evaluation(entry: Dict):
     """Append a new evaluation entry to evaluation.json."""
     evaluations = load_evaluations()
     entry["id"] = len(evaluations)
-    # Ensure all fields are JSON-serializable
     for key, value in entry.items():
         try:
             json.dumps(value)
@@ -76,8 +75,11 @@ def save_evaluation(entry: Dict):
         json.dump(evaluations, f, indent=4)
 
 # Initialize Services
-langchain_service = LangChainService()
-langchain_service.load_packages()  # Load vector store
+langchain_service = LangChainService(vector_store_path="faiss_vector_store")
+load_result = langchain_service.load_packages()
+if "Failed" in load_result:
+    raise RuntimeError(f"Failed to initialize vector store: {load_result}")
+logging.info(f"Vector store initialization result: {load_result}")
 llm = ChatOllama(model="llama3.2", temperature=1)
 prompts = Prompts()
 
@@ -154,7 +156,6 @@ Provide a JSON object with the scores and justifications, ensuring the response 
 
 # LangGraph Nodes
 def blending_node(state: BlendingState) -> BlendingState:
-    """Generate a blended expression using the RAG chain."""
     instructions = get_blending_instructions(state.settings)
     prompt_template = PromptTemplate(
         template=blending_prompt_template,
@@ -163,15 +164,14 @@ def blending_node(state: BlendingState) -> BlendingState:
     rag_chain = langchain_service.build_rag_chain(prompt_template)
     frames_str = ", ".join(state.frames)
     
-    # Populate context using the retriever from the vector store
     retriever = langchain_service.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
-    retrieved_docs = retriever.invoke(frames_str)  # Query the retriever with the frames
+    retrieved_docs = retriever.invoke(frames_str)
     context = "\n\n".join([doc.page_content for doc in retrieved_docs]) if retrieved_docs else "No relevant context found."
     
-    # Log the context
     logging.info(f"Frames: {frames_str} | Context: {context}")
+    if not retrieved_docs:
+        logging.warning(f"No documents retrieved for frames: {frames_str}")
     
-    # Generate response with populated context
     response = langchain_service.generate_response(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})
     if not isinstance(response, str):
         raise ValueError(f"Blending response must be a string, got {type(response)}")
@@ -209,9 +209,7 @@ def evaluate_node(state: BlendingState) -> BlendingState:
         blended_expression=state.blended_expression
     )
     response = llm.invoke(prompt)
-    # Debug: Print raw response
     print(f"Raw Evaluation Response: {repr(response.content)}")
-    # Clean the response: strip whitespace and collapse into a single line
     cleaned_response = ''.join(response.content.splitlines()).strip()
     try:
         eval_data = json.loads(cleaned_response)
@@ -268,7 +266,6 @@ if __name__ == "__main__":
         settings = select_random_settings()
         initial_state = BlendingState(frames=frames, settings=settings)
         final_state = compiled_graph.invoke(initial_state)
-        # Treat final_state as a dictionary since invoke returns AddableValuesDict
         print(f"Processed frames: {final_state['frames']}")
         print(f"Settings: {final_state['settings']}")
         print(f"Blended Expression: {final_state['blended_expression']}")

@@ -1,3 +1,4 @@
+#main.py
 import random
 import json
 import os
@@ -9,6 +10,14 @@ from typing import List, Dict, Optional
 
 from langchain_service import LangChainService
 from prompts import Prompts
+import logging
+
+# Configure logging at the top of the file (before the main loop)
+logging.basicConfig(
+    filename="blending_context.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # Configuration
 EVALUATION_FILE = "data/evaluation.json"
@@ -153,7 +162,16 @@ def blending_node(state: BlendingState) -> BlendingState:
     )
     rag_chain = langchain_service.build_rag_chain(prompt_template)
     frames_str = ", ".join(state.frames)
-    context = ""  # Placeholder; update with actual context if available
+    
+    # Populate context using the retriever from the vector store
+    retriever = langchain_service.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+    retrieved_docs = retriever.invoke(frames_str)  # Query the retriever with the frames
+    context = "\n\n".join([doc.page_content for doc in retrieved_docs]) if retrieved_docs else "No relevant context found."
+    
+    # Log the context
+    logging.info(f"Frames: {frames_str} | Context: {context}")
+    
+    # Generate response with populated context
     response = langchain_service.generate_response(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})
     if not isinstance(response, str):
         raise ValueError(f"Blending response must be a string, got {type(response)}")

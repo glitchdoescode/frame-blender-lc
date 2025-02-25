@@ -1,4 +1,4 @@
-#main.py
+#frame_blender.py
 from frame_hierarchy_analyzer import get_frames, analyze_hierarchy
 from evaluation_data_service import EvaluationDataService
 from prompts import Prompts

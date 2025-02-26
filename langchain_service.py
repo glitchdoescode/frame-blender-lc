@@ -13,6 +13,7 @@ from typing import List, Dict
 from config import FRAME_JSON_DIR
 from dotenv import load_dotenv
 from utils import logs, log_message  # Import logs and log_message from utils.py
+import asyncio
 
 class LangChainService:
     def __init__(self, vector_store_path: str):
@@ -116,9 +117,23 @@ class LangChainService:
         log_message("INFO - RAG chain built successfully")
         return rag_chain
 
+    async def generate_response_async(self, rag_chain, input_data: Dict) -> str:
+        """
+        Asynchronously generates a response using the RAG chain.
+        """
+        log_message(f"INFO - Generating response asynchronously with input: {json.dumps(input_data, indent=2)}")
+        try:
+            # Assume rag_chain.invoke is synchronous; wrap in asyncio.create_task or use async version if available
+            result = await asyncio.create_task(rag_chain.ainvoke(input_data))  # Use .ainvoke if available
+            log_message(f"DEBUG - Generated response: {result['answer'][:100]}...")  # Truncate for brevity
+            return result["answer"]
+        except Exception as e:
+            log_message(f"ERROR - Error during async response generation: {str(e)}")
+            return f"Error during generation: {str(e)}"
+
     def generate_response(self, rag_chain, input_data: Dict) -> str:
         """
-        Generates a response using the RAG chain.
+        Generates a response using the RAG chain (synchronous for other uses).
         """
         log_message(f"INFO - Generating response with input: {json.dumps(input_data, indent=2)}")
         try:

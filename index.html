@@ -326,7 +326,7 @@
                 });
                 if (!response.ok) throw new Error('Network response was not ok');
                 const data = await response.json();
-                let resultsHtml = '<h2>Generated Blends:</h2>';
+                let resultsHtml = '<h2>Generated Blends for Instance ' + data.instance_id + ':</h2>';
                 data.results.forEach((result, index) => {
                     resultsHtml += `
                         <div class="blend-result">
@@ -339,14 +339,14 @@
                     `;
                 });
                 document.getElementById("results").innerHTML = resultsHtml;
-                logMessage("Blends generated successfully: " + data.results.length + " results");
+                logMessage("Blends generated successfully for instance " + data.instance_id + ": " + data.results.length + " results");
             } catch (error) {
                 document.getElementById("results").innerHTML = '<h2>Error:</h2><pre>' + error.message + '</pre>';
                 logMessage("Error generating blends: " + error.message);
             } finally {
                 hideLoading();
                 resetUI();
-                logMessage("UI reset after blending completion.");
+                logMessage("UI reset after blending completion for instance.");
             }
         }
 

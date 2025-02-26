@@ -2,14 +2,17 @@
 import random
 import json
 import os
-from typing import List, Dict, Optional
-from langgraph.graph import StateGraph, END
+import uuid
+from typing import List, Dict, Optional, AsyncIterator
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 from langchain.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+import uvicorn
 
 from langchain_service import LangChainService
 from prompts import Prompts
@@ -227,9 +230,9 @@ Provide a JSON object with the scores and justifications, ensuring the response 
 """
 )
 
-# LangGraph Nodes
-def blending_node(state: BlendingState) -> BlendingState:
-    log_message("INFO - Starting blending process for frames: " + ", ".join(state.frames))
+# LangGraph Nodes (Updated for async and checkpointers)
+async def blending_node(state: BlendingState, config: Dict) -> Dict:
+    log_message(f"INFO - Starting blending process for instance {config['configurable']['thread_id']} with frames: " + ", ".join(state.frames))
     instructions = get_blending_instructions(state.settings)
     prompt_template = PromptTemplate(
         template=blending_prompt_template,
@@ -246,31 +249,31 @@ def blending_node(state: BlendingState) -> BlendingState:
     if not retrieved_docs:
         log_message(f"WARNING - No documents retrieved for frames: {frames_str}")
     
-    response = langchain_service.generate_response(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})
+    response = await langchain_service.generate_response_async(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})  # Assume async method
     if not isinstance(response, str):
         log_message(f"ERROR - Blending response must be a string, got {type(response)}")
         raise ValueError(f"Blending response must be a string, got {type(response)}")
     state.blended_expression = response
-    log_message("INFO - Blending completed successfully.")
+    log_message("INFO - Blending completed successfully for instance " + config['configurable']['thread_id'] + ".")
     return state
 
-def validation_node(state: BlendingState) -> BlendingState:
-    log_message("INFO - Starting validation process for blended expression.")
+async def validation_node(state: BlendingState, config: Dict) -> Dict:
+    log_message(f"INFO - Starting validation process for instance {config['configurable']['thread_id']}.")
     if not state.blended_expression:
         state.validation_result = "Invalid: No blended expression provided"
-        log_message("WARNING - No blended expression provided for validation.")
+        log_message(f"WARNING - No blended expression provided for validation in instance {config['configurable']['thread_id']}.")
         return state
     prompt = validation_prompt.format(
         frames=", ".join(state.frames),
         blended_expression=state.blended_expression
     )
-    response = llm.invoke(prompt)
+    response = await llm.ainvoke(prompt)  # Use async invoke if available
     state.validation_result = response.content
-    log_message("INFO - Validation completed: " + state.validation_result)
+    log_message(f"INFO - Validation completed for instance {config['configurable']['thread_id']}: " + state.validation_result)
     return state
 
-def evaluate_node(state: BlendingState) -> BlendingState:
-    log_message("INFO - Starting evaluation process for blended expression.")
+async def evaluate_node(state: BlendingState, config: Dict) -> Dict:
+    log_message(f"INFO - Starting evaluation process for instance {config['configurable']['thread_id']}.")
     if not state.blended_expression:
         state.evaluation = {
             "completeness": 0,
@@ -281,13 +284,13 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "execute_time": 0,
             "additional_notes": "No blended expression to evaluate"
         }
-        log_message("WARNING - No blended expression provided for evaluation.")
+        log_message(f"WARNING - No blended expression provided for evaluation in instance {config['configurable']['thread_id']}.")
         return state
     prompt = evaluation_prompt.format(
         frames=", ".join(state.frames),
         blended_expression=state.blended_expression
     )
-    response = llm.invoke(prompt)
+    response = await llm.ainvoke(prompt)  # Use async invoke if available
     cleaned_response = ''.join(response.content.splitlines()).strip()
     try:
         eval_data = json.loads(cleaned_response)
@@ -300,9 +303,9 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "execute_time": int(eval_data["execute_time"]),
             "additional_notes": eval_data.get("justifications", "")
         }
-        log_message("INFO - Evaluation completed: " + json.dumps(state.evaluation))
+        log_message(f"INFO - Evaluation completed for instance {config['configurable']['thread_id']}: " + json.dumps(state.evaluation))
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        log_message(f"ERROR - Failed to parse evaluation response: {e}, Cleaned Response: {cleaned_response}")
+        log_message(f"ERROR - Failed to parse evaluation response for instance {config['configurable']['thread_id']}: {e}, Cleaned Response: {cleaned_response}")
         state.evaluation = {
             "completeness": 0,
             "clarity": 0,
@@ -314,30 +317,33 @@ def evaluate_node(state: BlendingState) -> BlendingState:
         }
     return state
 
-def storage_node(state: BlendingState) -> BlendingState:
-    log_message("INFO - Starting storage process for blending result.")
+async def storage_node(state: BlendingState, config: Dict) -> Dict:
+    log_message(f"INFO - Starting storage process for instance {config['configurable']['thread_id']}.")
     entry = {
         "frames": state.frames,
         "settings": state.settings,
-        "blending_result": state.blended_expression,
+        "blended_expression": state.blended_expression,
         "evaluations": [state.evaluation],
     }
     save_evaluation(entry)
-    log_message(f"INFO - Stored evaluation with id {entry['id']}.")
+    log_message(f"INFO - Stored evaluation with id {entry['id']} for instance {config['configurable']['thread_id']}.")
     return state
 
-# Set Up the Graph
+# Set Up the Graph with Persistence
 graph = StateGraph(BlendingState)
 graph.add_node("blending", blending_node)
 graph.add_node("validation", validation_node)
 graph.add_node("evaluate", evaluate_node)
 graph.add_node("storage", storage_node)
+graph.add_edge(START, "blending")
 graph.add_edge("blending", "validation")
 graph.add_edge("validation", "evaluate")
 graph.add_edge("evaluate", "storage")
 graph.add_edge("storage", END)
-graph.set_entry_point("blending")
-compiled_graph = graph.compile()
+
+# Use MemorySaver for checkpointer
+checkpointer = MemorySaver()
+compiled_graph = graph.compile(checkpointer=checkpointer)
 
 # FastAPI Frontend
 app = FastAPI(title="Frame Blending API")
@@ -440,28 +446,31 @@ async def generate_blends(
     custom_frames: List[str] = Form(default=[]),
     prompting_strategy: str = Form(...),
     rhetorical: str = Form(...)
-):
+) -> JSONResponse:
     """Generate blends based on user-submitted form data."""
-    log_message("INFO - Generate blends request received.")
+    instance_id = str(uuid.uuid4())  # Generate unique instance_id for each request
+    log_message(f"INFO - Generate blends request received for instance {instance_id}.")
     randomize = randomize_frames.lower() == "true"
     settings = [prompting_strategy, rhetorical]
     frames = get_frames(frame_source, randomize, min_frames, max_frames, specific_frames, custom_frames)
     iterations = num_iterations if randomize else 1
 
     if not frames and randomize:
-        log_message("WARNING - No frames provided for random blending.")
-        return {"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]}
+        log_message(f"WARNING - No frames provided for random blending in instance {instance_id}.")
+        return JSONResponse({"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]})
     elif not frames:
-        log_message("WARNING - No frames provided for blending.")
-        return {"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]}
+        log_message(f"WARNING - No frames provided for blending in instance {instance_id}.")
+        return JSONResponse({"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]})
 
     results = []
-    for i in range(iterations):
-        log_message(f"INFO - Generating blend iteration {i + 1} for frames: {frames}")
+    config = {"configurable": {"thread_id": instance_id}}  # Use instance_id as thread_id for persistence
+
+    for i in range(iterations):  # Changed from async for to regular for
+        log_message(f"INFO - Generating blend iteration {i + 1} for instance {instance_id} with frames: {frames}")
         if randomize:  # Re-select frames for each iteration if randomizing
             frames = get_frames(frame_source, randomize, min_frames, max_frames, specific_frames, custom_frames)
         initial_state = BlendingState(frames=frames, settings=settings)
-        final_state = compiled_graph.invoke(initial_state)
+        final_state = await compiled_graph.ainvoke(initial_state, config=config)  # Use async invoke
         
         state_dict = final_state.get("values", {})
         result = {
@@ -473,9 +482,5 @@ async def generate_blends(
         }
         results.append(result)
 
-    log_message(f"INFO - Blending completed with {len(results)} results.")
-    return {"results": results}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=HOST, port=PORT)
+    log_message(f"INFO - Blending completed with {len(results)} results for instance {instance_id}.")
+    return JSONResponse({"results": results, "instance_id": instance_id})

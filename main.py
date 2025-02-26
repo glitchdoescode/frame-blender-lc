@@ -1,24 +1,44 @@
-#main.py
+# main.py
 import random
 import json
 import os
+from typing import List, Dict, Optional
 from langgraph.graph import StateGraph, END
 from langchain.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 
 from langchain_service import LangChainService
 from prompts import Prompts
-import logging
+from frame_hierarchy_analyzer import analyze_hierarchy, frame_relations, get_all_frames, get_related_frames
+from utils import logs, log_message  # Import logs and log_message from utils.py
 
-# Configure logging
-logging.basicConfig(
-    filename="blending_context.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+# Constants
+FRAME_JSON_DIR = "frame_json"
+EVALUATION_FILE = "data/evaluation.json"
+VECTOR_STORE_PATH = "faiss_vector_store"
+HOST = "0.0.0.0"
+PORT = 8000
+LOG_LEVEL = "INFO"
 
+# Options for dropdowns
+PROMPTING_STRATEGIES = ["zero-shot", "one-shot", "few-shot", "chain-of-thought"]
+RHETORICAL_OPTIONS = ["rhetorical", "non-rhetorical"]
+FRAME_SOURCES = ["default", "frame_json"]
+HIERARCHY_RELATIONS = list(frame_relations.keys())  # ["Inheritance", "Perspective", "Usage", "Subframe"]
+
+# State Definition
+class BlendingState(BaseModel):
+    frames: List[str] = Field(..., description="List of frames to blend")
+    settings: List[str] = Field(..., description="Prompting strategy and rhetorical setting")
+    blended_expression: Optional[str] = Field(None, description="Generated blended expression")
+    validation_result: Optional[str] = Field(None, description="Validation result")
+    evaluation: Optional[Dict] = Field(None, description="Evaluation scores and notes")
+
+# Utility Functions
 def extract_frames_from_directory(dir_path: str) -> List[str]:
     """Read each .json file in dir_path and extract the 'frame_name'."""
     frames = []
@@ -31,45 +51,61 @@ def extract_frames_from_directory(dir_path: str) -> List[str]:
                     frame_name = data.get("frame_name")
                     if frame_name:
                         frames.append(frame_name)
+                log_message(f"INFO - Loaded frame from {filename}")
             except (json.JSONDecodeError, OSError) as e:
-                logging.warning(f"Could not process {filename}: {e}")
+                log_message(f"WARNING - Could not process {filename}: {e}")
     return frames
 
-# Configuration
-EVALUATION_FILE = "data/evaluation.json"
-FRAME_JSON_DIR = "frame_json"
-ALL_FRAMES = extract_frames_from_directory(FRAME_JSON_DIR)
+def get_all_frames() -> List[str]:
+    """Get all frames from frame_json directory."""
+    return extract_frames_from_directory(FRAME_JSON_DIR)
 
-# If no frames were found, you can optionally fall back to a default list:
-if not ALL_FRAMES:
-    ALL_FRAMES = [
-        "Travel", "Aging", "Time", "Money", "Health",
-        "Education", "Technology", "Environment", "Politics", "Culture"
-    ]
+def get_frames(frame_source: str, randomize_frames: bool, min_frames: int, max_frames: int, specific_frames: str, custom_frames: List[str] = None) -> List[str]:
+    """Determine frames based on user inputs."""
+    if frame_source == "default":
+        all_frames = [f for f in custom_frames if f.strip()] if custom_frames else []
+        if not all_frames:
+            log_message("WARNING - No custom frames provided for default source, using empty list.")
+    else:
+        all_frames = extract_frames_from_directory(FRAME_JSON_DIR)
+        if not all_frames:
+            log_message("WARNING - No frames extracted from directory, using empty list.")
 
-print("Extracted frames:", ALL_FRAMES)
-PROMPTING_STRATEGIES = ["zero-shot", "one-shot", "few-shot", "chain-of-thought"]
-RHETORICAL_OPTIONS = ["rhetorical", "non-rhetorical"]
+    log_message(f"INFO - Available frames: {all_frames}")
+    if not all_frames:
+        return []  # Return empty list if no frames are available
 
-# State Definition
-class BlendingState(BaseModel):
-    frames: List[str] = Field(..., description="List of frames to blend")
-    settings: List[str] = Field(..., description="Prompting strategy and rhetorical setting")
-    blended_expression: Optional[str] = Field(None, description="Generated blended expression")
-    validation_result: Optional[str] = Field(None, description="Validation result")
-    evaluation: Optional[Dict] = Field(None, description="Evaluation scores and notes")
+    if randomize_frames:
+        num_frames = random.randint(min_frames, max_frames)
+        return random.sample(all_frames, min(num_frames, len(all_frames)))
+    elif specific_frames:
+        specific_list = [f.strip() for f in specific_frames.split(",") if f.strip()]
+        return [f for f in specific_list if f in all_frames] or all_frames[:max_frames]
+    else:
+        return all_frames[:max_frames]
 
-# Utility Functions
-def select_random_frames(min_frames=2, max_frames=5) -> List[str]:
-    """Select a random number of frames from ALL_FRAMES."""
-    num_frames = random.randint(min_frames, max_frames)
-    return random.sample(ALL_FRAMES, num_frames)
-
-def select_random_settings() -> List[str]:
-    """Select random prompting strategy and rhetorical setting."""
-    prompting = random.choice(PROMPTING_STRATEGIES)
-    rhetorical = random.choice(RHETORICAL_OPTIONS)
-    return [prompting, rhetorical]
+def format_hierarchy(hierarchy_str: str) -> str:
+    """Format the hierarchy string to ensure UTF-8 characters are preserved and indentation is correct."""
+    lines = hierarchy_str.split('\n')
+    formatted_lines = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if i == 0:  # Root node
+            formatted_lines.append(line)
+        else:
+            parts = line.split(maxsplit=1)
+            if len(parts) > 1:
+                prefix, name = parts
+                # Ensure UTF-8 characters and proper indentation
+                depth = (len(prefix) + 1) // 4  # Approximate depth based on prefix length
+                indent = "│   " * (depth - 1) if depth > 1 else ""
+                is_last = i == len(lines) - 1 or not lines[i + 1].strip()
+                connector = "└── " if is_last else "├── "
+                formatted_lines.append(f"{indent}{connector}{name}")
+            else:
+                formatted_lines.append(line)
+    return '\n'.join(formatted_lines)
 
 def ensure_data_directory():
     """Ensure the data directory and evaluation.json exist."""
@@ -77,12 +113,19 @@ def ensure_data_directory():
     if not os.path.exists(EVALUATION_FILE):
         with open(EVALUATION_FILE, "w") as f:
             json.dump([], f)
+    log_message("INFO - Ensured data directory and evaluation.json exist.")
 
 def load_evaluations() -> List[Dict]:
     """Load existing evaluations from evaluation.json."""
     ensure_data_directory()
-    with open(EVALUATION_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(EVALUATION_FILE, "r") as f:
+            evaluations = json.load(f)
+        log_message("INFO - Loaded evaluations from evaluation.json.")
+        return evaluations
+    except Exception as e:
+        log_message(f"ERROR - Failed to load evaluations: {e}")
+        return []
 
 def save_evaluation(entry: Dict):
     """Append a new evaluation entry to evaluation.json."""
@@ -94,15 +137,20 @@ def save_evaluation(entry: Dict):
         except TypeError:
             raise ValueError(f"Non-serializable value in {key}: {value}")
     evaluations.append(entry)
-    with open(EVALUATION_FILE, "w") as f:
-        json.dump(evaluations, f, indent=4)
+    try:
+        with open(EVALUATION_FILE, "w") as f:
+            json.dump(evaluations, f, indent=4)
+        log_message(f"INFO - Saved evaluation with id {entry['id']} to evaluation.json.")
+    except Exception as e:
+        log_message(f"ERROR - Failed to save evaluation: {e}")
 
 # Initialize Services
-langchain_service = LangChainService(vector_store_path="faiss_vector_store")
+langchain_service = LangChainService(vector_store_path=VECTOR_STORE_PATH)
 load_result = langchain_service.load_packages()
 if "Failed" in load_result:
+    log_message(f"ERROR - Failed to initialize vector store: {load_result}")
     raise RuntimeError(f"Failed to initialize vector store: {load_result}")
-logging.info(f"Vector store initialization result: {load_result}")
+log_message(f"INFO - Vector store initialization result: {load_result}")
 llm = ChatOllama(model="llama3.2", temperature=1)
 prompts = Prompts()
 
@@ -113,9 +161,11 @@ def get_blending_instructions(settings: List[str]) -> str:
     rhetorical = settings[1] == "rhetorical"
     method = getattr(prompts, prompting_strategy, None)
     if method is None:
+        log_message(f"ERROR - Invalid prompting strategy: {prompting_strategy}")
         raise ValueError(f"Invalid prompting strategy: {prompting_strategy}")
     instructions = method(rhetorical)
     if not isinstance(instructions, str):
+        log_message(f"ERROR - Instructions must be a string, got {type(instructions)}")
         raise ValueError(f"Instructions must be a string, got {type(instructions)}")
     return instructions
 
@@ -179,6 +229,7 @@ Provide a JSON object with the scores and justifications, ensuring the response 
 
 # LangGraph Nodes
 def blending_node(state: BlendingState) -> BlendingState:
+    log_message("INFO - Starting blending process for frames: " + ", ".join(state.frames))
     instructions = get_blending_instructions(state.settings)
     prompt_template = PromptTemplate(
         template=blending_prompt_template,
@@ -191,20 +242,23 @@ def blending_node(state: BlendingState) -> BlendingState:
     retrieved_docs = retriever.invoke(frames_str)
     context = "\n\n".join([doc.page_content for doc in retrieved_docs]) if retrieved_docs else "No relevant context found."
     
-    logging.info(f"Frames: {frames_str} | Context: {context}")
+    log_message(f"INFO - Frames: {frames_str} | Context: {context[:100]}...")  # Truncate context for brevity
     if not retrieved_docs:
-        logging.warning(f"No documents retrieved for frames: {frames_str}")
+        log_message(f"WARNING - No documents retrieved for frames: {frames_str}")
     
     response = langchain_service.generate_response(rag_chain, {"context": context, "input": frames_str, "instructions": instructions})
     if not isinstance(response, str):
+        log_message(f"ERROR - Blending response must be a string, got {type(response)}")
         raise ValueError(f"Blending response must be a string, got {type(response)}")
     state.blended_expression = response
+    log_message("INFO - Blending completed successfully.")
     return state
 
 def validation_node(state: BlendingState) -> BlendingState:
-    """Validate the blended expression."""
+    log_message("INFO - Starting validation process for blended expression.")
     if not state.blended_expression:
         state.validation_result = "Invalid: No blended expression provided"
+        log_message("WARNING - No blended expression provided for validation.")
         return state
     prompt = validation_prompt.format(
         frames=", ".join(state.frames),
@@ -212,10 +266,11 @@ def validation_node(state: BlendingState) -> BlendingState:
     )
     response = llm.invoke(prompt)
     state.validation_result = response.content
+    log_message("INFO - Validation completed: " + state.validation_result)
     return state
 
 def evaluate_node(state: BlendingState) -> BlendingState:
-    """Evaluate the blended expression."""
+    log_message("INFO - Starting evaluation process for blended expression.")
     if not state.blended_expression:
         state.evaluation = {
             "completeness": 0,
@@ -226,13 +281,13 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "execute_time": 0,
             "additional_notes": "No blended expression to evaluate"
         }
+        log_message("WARNING - No blended expression provided for evaluation.")
         return state
     prompt = evaluation_prompt.format(
         frames=", ".join(state.frames),
         blended_expression=state.blended_expression
     )
     response = llm.invoke(prompt)
-    print(f"Raw Evaluation Response: {repr(response.content)}")
     cleaned_response = ''.join(response.content.splitlines()).strip()
     try:
         eval_data = json.loads(cleaned_response)
@@ -245,8 +300,9 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "execute_time": int(eval_data["execute_time"]),
             "additional_notes": eval_data.get("justifications", "")
         }
+        log_message("INFO - Evaluation completed: " + json.dumps(state.evaluation))
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        print(f"Failed to parse evaluation response: {e}, Cleaned Response: {cleaned_response}")
+        log_message(f"ERROR - Failed to parse evaluation response: {e}, Cleaned Response: {cleaned_response}")
         state.evaluation = {
             "completeness": 0,
             "clarity": 0,
@@ -254,12 +310,12 @@ def evaluate_node(state: BlendingState) -> BlendingState:
             "depth_of_understanding": 0,
             "coherence": 0,
             "execute_time": 0,
-            "additional_notes": f"Failed to parse evaluation: {str(e)}"
+            "additional_notes": f"Failed to parse evaluation: {e}"
         }
     return state
 
 def storage_node(state: BlendingState) -> BlendingState:
-    """Store the results in evaluation.json."""
+    log_message("INFO - Starting storage process for blending result.")
     entry = {
         "frames": state.frames,
         "settings": state.settings,
@@ -267,6 +323,7 @@ def storage_node(state: BlendingState) -> BlendingState:
         "evaluations": [state.evaluation],
     }
     save_evaluation(entry)
+    log_message(f"INFO - Stored evaluation with id {entry['id']}.")
     return state
 
 # Set Up the Graph
@@ -282,16 +339,143 @@ graph.add_edge("storage", END)
 graph.set_entry_point("blending")
 compiled_graph = graph.compile()
 
-# Main Loop
-if __name__ == "__main__":
-    for _ in range(5):  # Run 5 times with random frames and settings
-        frames = select_random_frames()
-        settings = select_random_settings()
+# FastAPI Frontend
+app = FastAPI(title="Frame Blending API")
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/", response_class=HTMLResponse)
+async def get_index(request: Request):
+    """Serve the HTML page with configuration options from index.html."""
+    with open("index.html", "r") as f:
+        html_content = f.read()
+
+    # Populate dropdown options dynamically, setting "default" as selected
+    frame_source_options = "".join(
+        f'<option value="{source}" {"selected" if source == "default" else ""}>{source.capitalize()}</option>'
+        for source in FRAME_SOURCES
+    )
+    prompting_strategy_options = "".join(f'<option value="{strategy}">{strategy}</option>' for strategy in PROMPTING_STRATEGIES)
+    rhetorical_options = "".join(f'<option value="{option}">{option}</option>' for option in RHETORICAL_OPTIONS)
+    hierarchy_relation_options = "".join(f'<option value="{relation}">{relation}</option>' for relation in HIERARCHY_RELATIONS)
+
+    # Replace placeholders in the HTML
+    html_content = html_content.replace("{{FRAME_SOURCE_OPTIONS}}", frame_source_options)
+    html_content = html_content.replace("{{PROMPTING_STRATEGY_OPTIONS}}", prompting_strategy_options)
+    html_content = html_content.replace("{{RHETORICAL_OPTIONS}}", rhetorical_options)
+    html_content = html_content.replace("{{HIERARCHY_RELATION_OPTIONS}}", hierarchy_relation_options)
+
+    return HTMLResponse(content=html_content)
+
+@app.get("/logs", response_class=HTMLResponse)
+async def get_logs(request: Request):
+    """Serve the logs page displaying in-memory logs."""
+    logs_html = "<h1>Application Logs</h1><div class='logs-container'>" + \
+                "".join([f"<div class='log-entry'>{log}</div>" for log in logs]) + \
+                "</div>"
+    return HTMLResponse(content=logs_html)
+
+@app.get("/output", response_class=HTMLResponse)
+async def get_output(request: Request):
+    """Serve the output history page displaying evaluation.json in reverse order."""
+    evaluations = load_evaluations()
+    evaluations.reverse()  # Reverse order (highest ID first)
+    output_html = "<h1>Output History</h1><div class='output-container'>" + \
+                  "".join([f"""
+                    <div class='output-entry'>
+                        <h3>Blend #{eval['id'] + 1}</h3>
+                        <p><strong>Frames Used:</strong> {', '.join(eval['frames'])}</p>
+                        <p><strong>Settings:</strong> {', '.join(eval['settings'])}</p>
+                        <p><strong>Blended Expression:</strong> {eval['blending_result'] or 'Not generated'}</p>
+                        <pre><strong>Evaluation:</strong> {json.dumps(eval['evaluations'][0], indent=2)}</pre>
+                    </div>
+                  """ for eval in evaluations]) + \
+                  "</div>"
+    return HTMLResponse(content=output_html)
+
+@app.post("/hierarchy")
+async def get_hierarchy(
+    frame_source: str = Form(...),
+    custom_frames: List[str] = Form(default=[]),
+    hierarchy_relation: str = Form(...),
+    hierarchy_direction: str = Form(...)
+):
+    """Generate and return the hierarchy tree for the active custom frame."""
+    log_message("INFO - Hierarchy request received for frame source: " + frame_source)
+    if frame_source != "default" or not custom_frames:
+        log_message("WARNING - Invalid hierarchy request: frame source or custom frames missing.")
+        return {"hierarchy": None}
+
+    # Use only the first frame (active field value) for hierarchy generation
+    active_frame = custom_frames[0].strip() if custom_frames and custom_frames[0].strip() else " "
+    if not active_frame:
+        log_message("WARNING - No active frame provided for hierarchy.")
+        return {"hierarchy": None}
+
+    reverse_order = hierarchy_direction == "parents"
+    try:
+        # Get all frames from frame_json to include related frames
+        all_frames = get_all_frames()
+        combined_frames = {active_frame}  # Start with the active frame
+
+        # Recursively expand to include all related frames
+        related_frames = get_related_frames(active_frame, hierarchy_relation, reverse_order, all_frames)
+        combined_frames.update(related_frames)
+
+        root = analyze_hierarchy(list(combined_frames), hierarchy_relation, reverse_order=reverse_order)
+        hierarchy_str = format_hierarchy(str(root))
+        log_message("INFO - Hierarchy generated for frame: " + active_frame)
+        return {"hierarchy": hierarchy_str}
+    except Exception as e:
+        log_message(f"ERROR - Failed to generate hierarchy for frame {active_frame}: {str(e)}")
+        return {"hierarchy": f"Error: {str(e)}"}
+
+@app.post("/generate")
+async def generate_blends(
+    frame_source: str = Form(...),
+    randomize_frames: str = Form(...),
+    min_frames: int = Form(default=2),
+    max_frames: int = Form(default=5),
+    num_iterations: int = Form(default=1),
+    specific_frames: str = Form(default=""),
+    custom_frames: List[str] = Form(default=[]),
+    prompting_strategy: str = Form(...),
+    rhetorical: str = Form(...)
+):
+    """Generate blends based on user-submitted form data."""
+    log_message("INFO - Generate blends request received.")
+    randomize = randomize_frames.lower() == "true"
+    settings = [prompting_strategy, rhetorical]
+    frames = get_frames(frame_source, randomize, min_frames, max_frames, specific_frames, custom_frames)
+    iterations = num_iterations if randomize else 1
+
+    if not frames and randomize:
+        log_message("WARNING - No frames provided for random blending.")
+        return {"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]}
+    elif not frames:
+        log_message("WARNING - No frames provided for blending.")
+        return {"results": [{"frames": [], "blended_expression": "No frames provided", "validation": "Invalid", "evaluation": {"additional_notes": "No frames to blend"}}]}
+
+    results = []
+    for i in range(iterations):
+        log_message(f"INFO - Generating blend iteration {i + 1} for frames: {frames}")
+        if randomize:  # Re-select frames for each iteration if randomizing
+            frames = get_frames(frame_source, randomize, min_frames, max_frames, specific_frames, custom_frames)
         initial_state = BlendingState(frames=frames, settings=settings)
         final_state = compiled_graph.invoke(initial_state)
-        print(f"Processed frames: {final_state['frames']}")
-        print(f"Settings: {final_state['settings']}")
-        print(f"Blended Expression: {final_state['blended_expression']}")
-        print(f"Validation: {final_state['validation_result']}")
-        print(f"Evaluation: {final_state['evaluation']}")
-        print("-" * 50)
+        
+        state_dict = final_state.get("values", {})
+        result = {
+            "frames": state_dict.get("frames", frames),
+            "settings": state_dict.get("settings", settings),
+            "blended_expression": state_dict.get("blended_expression"),
+            "validation": state_dict.get("validation_result"),
+            "evaluation": state_dict.get("evaluation")
+        }
+        results.append(result)
+
+    log_message(f"INFO - Blending completed with {len(results)} results.")
+    return {"results": results}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=HOST, port=PORT)

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Frame Blending</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; font-size: 14px; }
+        .form-container { max-width: 600px; margin-bottom: 20px; }
+        label { display: block; margin: 10px 0 5px; }
+        select, input[type="text"], input[type="number"] { width: 100%; padding: 8px; margin-bottom: 10px; }
+        button { padding: 10px 20px; background-color: #4CAF50; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        .result-container, .logs-container, .output-container { margin-top: 20px; }
+        .blend-result, .log-entry, .output-entry { border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background-color: #f9f9f9; }
+        pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; white-space: pre-wrap; overflow-x: auto; }
+        .frame-input { display: flex; align-items: center; margin-bottom: 10px; }
+        .frame-input input { flex-grow: 1; margin-right: 10px; }
+        .remove-btn { background-color: #ff4444; padding: 5px 10px; }
+        .remove-btn:hover { background-color: #cc0000; }
+        #hierarchyContainer { margin-top: 10px; border: 1px solid #ccc; padding: 10px; max-height: 300px; overflow-y: auto; }
+        .hierarchy-line { cursor: pointer; padding: 5px; white-space: pre; }
+        .hierarchy-line:hover { background-color: #e0e0e0; }
+        .selected { background-color: #d0f0d0; }
+        .focused { background-color: #ffff99; border: 1px solid #ff0; font-weight: bold; }
+        .nav-links { margin-bottom: 20px; }
+        .nav-links a { margin-right: 15px; text-decoration: none; color: #4CAF50; }
+        .nav-links a:hover { text-decoration: underline; }
+        #loading { display: none; color: #666; }
+    </style>
+</head>
+<body onload="toggleFrameSource(); toggleFrameOptions(); initHierarchyNavigation()">
+    <h1>Frame Blending Application</h1>
+    <div class="nav-links">
+        <a href="/" onclick="resetUI(); return false;">Home</a>
+        <a href="/logs">Logs</a>
+        <a href="/output">Output History</a>
+    </div>
+    <div class="form-container">
+        <form id="configForm" onsubmit="generateBlends(event)">
+            <label for="frame_source">Frame Source:</label>
+            <select id="frame_source" name="frame_source" onchange="toggleFrameSource()">
+                {{FRAME_SOURCE_OPTIONS}}
+            </select>
+
+            <div id="defaultFrames" style="display: none;">
+                <label>Custom Frames:</label>
+                <div id="frameInputs">
+                    <div class="frame-input">
+                        <input type="text" name="custom_frames" placeholder="Enter frame name" oninput="updateHierarchyForActiveField()" onfocus="setActiveField(this)">
+                        <button type="button" class="remove-btn" onclick="removeFrame(this)">-</button>
+                    </div>
+                </div>
+                <button type="button" onclick="addFrame()">+ Add Frame</button>
+
+                <label for="hierarchy_relation">Hierarchy Relation:</label>
+                <select id="hierarchy_relation" name="hierarchy_relation" onchange="updateHierarchyForActiveField()">
+                    {{HIERARCHY_RELATION_OPTIONS}}
+                </select>
+
+                <label for="hierarchy_direction">Direction:</label>
+                <select id="hierarchy_direction" name="hierarchy_direction" onchange="updateHierarchyForActiveField()">
+                    <option value="children">Children</option>
+                    <option value="parents">Parents</option>
+                </select>
+
+                <div id="hierarchyContainer">
+                    <pre id="hierarchyTree">Enter frames to see hierarchy...</pre>
+                </div>
+            </div>
+
+            <label for="randomize_frames">Randomize Frames:</label>
+            <select id="randomize_frames" name="randomize_frames" onchange="toggleFrameOptions()">
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+            </select>
+
+            <div id="randomOptions" style="display: block;">
+                <label for="min_frames">Minimum Frames (2-5):</label>
+                <input type="number" id="min_frames" name="min_frames" min="2" max="5" value="2">
+
+                <label for="max_frames">Maximum Frames (2-5):</label>
+                <input type="number" id="max_frames" name="max_frames" min="2" max="5" value="5">
+
+                <label for="num_iterations">Number of Iterations (1-10):</label>
+                <input type="number" id="num_iterations" name="num_iterations" min="1" max="10" value="5">
+            </div>
+
+            <div id="specificOptions" style="display: none;">
+                <label for="specific_frames">Specific Frames (comma-separated):</label>
+                <input type="text" id="specific_frames" name="specific_frames" placeholder="e.g., Time, Money">
+            </div>
+
+            <label for="prompting_strategy">Prompting Strategy:</label>
+            <select id="prompting_strategy" name="prompting_strategy">
+                {{PROMPTING_STRATEGY_OPTIONS}}
+            </select>
+
+            <label for="rhetorical">Rhetorical Style:</label>
+            <select id="rhetorical" name="rhetorical">
+                {{RHETORICAL_OPTIONS}}
+            </select>
+
+            <button type="submit" onclick="showLoading()">Generate Blends</button>
+            <div id="loading">Generating... Please wait...</div>
+        </form>
+    </div>
+    <div id="results" class="result-container"></div>
+    <script>
+        let selectedFrames = new Set();
+        let focusedIndex = -1;
+        const hierarchyLines = [];
+        let activeField = null;
+        let logs = [];
+
+        function logMessage(message) {
+            logs.push(new Date().toLocaleString() + " - " + message);
+            if (document.location.pathname === "/logs") {
+                updateLogs();
+            }
+        }
+
+        function updateLogs() {
+            const logsContainer = document.getElementById("logsContainer") || document.createElement("div");
+            logsContainer.id = "logsContainer";
+            logsContainer.className = "logs-container";
+            logsContainer.innerHTML = logs.map(log => `<div class="log-entry">${log}</div>`).join('');
+            if (document.location.pathname === "/logs") {
+                document.body.innerHTML = '';
+                document.body.appendChild(logsContainer);
+            }
+        }
+
+        function setActiveField(field) {
+            activeField = field;
+            updateHierarchyForActiveField();
+        }
+
+        function toggleFrameSource() {
+            const source = document.getElementById("frame_source").value;
+            document.getElementById("defaultFrames").style.display = source === "default" ? "block" : "none";
+            if (source === "default" && activeField) updateHierarchyForActiveField();
+        }
+
+        function toggleFrameOptions() {
+            const randomize = document.getElementById("randomize_frames").value === "true";
+            document.getElementById("randomOptions").style.display = randomize ? "block" : "none";
+            document.getElementById("specificOptions").style.display = randomize ? "none" : "block";
+        }
+
+        function addFrame() {
+            const frameInputs = document.getElementById("frameInputs");
+            const newInput = document.createElement("div");
+            newInput.className = "frame-input";
+            newInput.innerHTML = `
+                <input type="text" name="custom_frames" placeholder="Enter frame name" oninput="updateHierarchyForActiveField()" onfocus="setActiveField(this)">
+                <button type="button" class="remove-btn" onclick="removeFrame(this)">-</button>
+            `;
+            frameInputs.appendChild(newInput);
+            setActiveField(newInput.querySelector('input')); // Set the new input as active
+            updateHierarchyForActiveField();
+            logMessage("New frame input added.");
+        }
+
+        function removeFrame(button) {
+            const frameInputs = document.getElementById("frameInputs");
+            if (frameInputs.children.length > 1) {
+                const currentInput = button.parentElement.querySelector('input');
+                button.parentElement.remove();
+                // Set active field to the first input if the removed one was active
+                if (currentInput === activeField) {
+                    activeField = frameInputs.children[0].querySelector('input');
+                }
+                updateHierarchyForActiveField();
+                logMessage("Frame input removed.");
+            }
+        }
+
+        async function updateHierarchyForActiveField() {
+            if (!activeField || document.getElementById("frame_source").value !== "default") {
+                return;
+            }
+
+            logMessage("Updating hierarchy for active field: " + activeField.value);
+            const form = document.getElementById("configForm");
+            const formData = new FormData(form);
+            const currentValue = activeField.value.trim() || " "; // Use a space as default if empty
+            formData.set("custom_frames", [currentValue]); // Use only the active field's value
+
+            const response = await fetch('/hierarchy', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+            const hierarchyTree = document.getElementById("hierarchyTree");
+            hierarchyTree.innerHTML = '';
+            hierarchyLines.length = 0; // Reset lines array
+
+            console.log("Hierarchy data received:", data.hierarchy); // Debug log
+            if (data.hierarchy) {
+                const lines = data.hierarchy
+                    .split('\n')
+                    .filter(line => line.trim() && line.trim() !== '')
+                    .map(line => line.trim()); // Trim each line and filter out empty ones
+
+                console.log("Filtered lines:", lines); // Debug log
+                lines.forEach((line, index) => {
+                    const div = document.createElement("div");
+                    div.className = "hierarchy-line";
+                    div.textContent = line;
+                    div.tabIndex = 0; // Make div focusable for keyboard navigation
+                    div.onclick = () => toggleFrameSelection(line, div);
+                    if (index === 0) div.style.fontWeight = "bold"; // Root node
+
+                    // If this frame name is already selected, mark it as selected
+                    if (selectedFrames.has(
+                        line.trim().split(/[\s└├│]+/).filter(Boolean).pop()
+                    )) {
+                        div.classList.add("selected");
+                    }
+                    hierarchyTree.appendChild(div);
+                    hierarchyLines.push(div);
+                });
+
+                console.log("Hierarchy lines count:", hierarchyLines.length); // Debug log
+                if (hierarchyLines.length > 0 && focusedIndex === -1) {
+                    focusedIndex = 0;
+                    hierarchyLines[focusedIndex].classList.add("focused");
+                } else if (focusedIndex >= hierarchyLines.length) {
+                    focusedIndex = Math.max(0, hierarchyLines.length - 1);
+                    if (focusedIndex >= 0) {
+                        hierarchyLines[focusedIndex].classList.add("focused");
+                    }
+                } else if (focusedIndex < 0) {
+                    focusedIndex = 0;
+                    if (hierarchyLines.length > 0) {
+                        hierarchyLines[focusedIndex].classList.add("focused");
+                    }
+                }
+            } else {
+                hierarchyTree.textContent = "No hierarchy available.";
+                focusedIndex = -1;
+            }
+            logMessage("Hierarchy updated for field: " + currentValue);
+        }
+
+        function initHierarchyNavigation() {
+            document.addEventListener('keydown', (e) => {
+                // Only handle arrow keys if default frames are visible
+                // and there are hierarchy lines available
+                if (document.getElementById("defaultFrames").style.display === "block" &&
+                    hierarchyLines.length > 0) {
+                    handleGlobalKeyPress(e);
+                }
+            });
+        }
+
+        function handleGlobalKeyPress(e) {
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Enter') {
+                e.preventDefault();
+                handleKeyPress(e);
+            }
+        }
+
+        function handleKeyPress(e) {
+            if (hierarchyLines.length === 0) return;
+
+            console.log("Key pressed:", e.key, "Current focusedIndex:", focusedIndex, "Lines count:", hierarchyLines.length);
+            if (e.key === 'ArrowUp' && focusedIndex > 0) {
+                hierarchyLines[focusedIndex].classList.remove("focused");
+                focusedIndex--;
+                hierarchyLines[focusedIndex].classList.add("focused");
+                hierarchyLines[focusedIndex].focus();
+            } else if (e.key === 'ArrowDown' && focusedIndex < hierarchyLines.length - 1) {
+                hierarchyLines[focusedIndex].classList.remove("focused");
+                focusedIndex++;
+                hierarchyLines[focusedIndex].classList.add("focused");
+                hierarchyLines[focusedIndex].focus();
+            } else if (e.key === 'Enter' && focusedIndex >= 0 && activeField) {
+                const frameName = hierarchyLines[focusedIndex]
+                    .textContent.trim()
+                    .split(/[\s└├│]+/)
+                    .filter(Boolean)
+                    .pop();
+
+                // Overwrite the active input field with the selected frame
+                activeField.value = frameName;
+                toggleFrameSelection(hierarchyLines[focusedIndex].textContent, hierarchyLines[focusedIndex]);
+                updateHierarchyForActiveField(); // Refresh hierarchy for the new value
+                logMessage("Selected frame from hierarchy: " + frameName);
+            }
+        }
+
+        function toggleFrameSelection(line, element) {
+            const frameName = line.trim().split(/[\s└├│]+/).filter(Boolean).pop();
+            if (selectedFrames.has(frameName)) {
+                selectedFrames.delete(frameName);
+                element.classList.remove("selected");
+            } else {
+                selectedFrames.add(frameName);
+                element.classList.add("selected");
+            }
+            updateSpecificFrames();
+            logMessage("Toggled frame selection: " + frameName);
+        }
+
+        function updateSpecificFrames() {
+            const specificFramesInput = document.getElementById("specific_frames");
+            specificFramesInput.value = Array.from(selectedFrames).join(", ");
+            logMessage("Updated specific frames: " + specificFramesInput.value);
+        }
+
+        async function generateBlends(event) {
+            event.preventDefault();
+            showLoading();
+            logMessage("Generating blends started...");
+
+            const form = document.getElementById("configForm");
+            const formData = new FormData(form);
+            formData.set("specific_frames", Array.from(selectedFrames).join(", "));
+
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) throw new Error('Network response was not ok');
+                const data = await response.json();
+                let resultsHtml = '<h2>Generated Blends:</h2>';
+                data.results.forEach((result, index) => {
+                    resultsHtml += `
+                        <div class="blend-result">
+                            <h3>Blend #${index + 1}</h3>
+                            <p><strong>Frames Used:</strong> ${result.frames.join(", ")}</p>
+                            <p><strong>Blended Expression:</strong> ${result.blended_expression || "Not generated"}</p>
+                            <p><strong>Validation:</strong> ${result.validation || "Not validated"}</p>
+                            <pre><strong>Evaluation:</strong> ${JSON.stringify(result.evaluation, null, 2)}</pre>
+                        </div>
+                    `;
+                });
+                document.getElementById("results").innerHTML = resultsHtml;
+                logMessage("Blends generated successfully: " + data.results.length + " results");
+            } catch (error) {
+                document.getElementById("results").innerHTML = '<h2>Error:</h2><pre>' + error.message + '</pre>';
+                logMessage("Error generating blends: " + error.message);
+            } finally {
+                hideLoading();
+                resetUI();
+                logMessage("UI reset after blending completion.");
+            }
+        }
+
+        function showLoading() {
+            document.getElementById("loading").style.display = "block";
+        }
+
+        function hideLoading() {
+            document.getElementById("loading").style.display = "none";
+        }
+
+        function resetUI() {
+            document.getElementById("configForm").reset();
+            document.getElementById("results").innerHTML = '';
+            selectedFrames.clear();
+            focusedIndex = -1;
+            hierarchyLines.length = 0;
+            activeField = document.querySelector('#frameInputs input[name="custom_frames"]');
+            document.getElementById("defaultFrames").style.display = "none";
+            document.getElementById("randomOptions").style.display = "block";
+            document.getElementById("specificOptions").style.display = "none";
+            document.getElementById("hierarchyTree").textContent = "Enter frames to see hierarchy...";
+            document.getElementById("specific_frames").value = "";
+            logMessage("UI reset to initial state.");
+        }
+    </script>
+</body>
+</html>

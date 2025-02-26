@@ -1,4 +1,4 @@
-#prompts.py
+# prompts.py
 class Prompts:
     def __init__(self):
         self.example_time_money = '''
